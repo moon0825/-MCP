@@ -34,7 +34,8 @@ class GroqAdapter(AsrAdapter):
                             "model": self.model,
                             "language": language,
                             "response_format": "verbose_json",
-                            "timestamp_granularities[]": "word",
+                            # 단어(화자 배정용) + 세그먼트(원문·신뢰도용) 둘 다 요청
+                            "timestamp_granularities[]": ["word", "segment"],
                             **({"prompt": prompt} if prompt else {}),
                         },
                         files={"file": (chunk_path.name, f, "audio/wav")},
