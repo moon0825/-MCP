@@ -9,8 +9,10 @@ DB_PATH = DATA_DIR / "scribe.db"
 
 # 화자 임베딩 코사인 유사도 제안 임계값 (자동 확정 아님 — 제안만)
 SPEAKER_SUGGEST_THRESHOLD = float(os.environ.get("MEETING_SCRIBE_SPK_THRESHOLD", "0.55"))
-# 클러스터링 임계값 (작을수록 화자를 더 잘게 나눔)
-CLUSTER_THRESHOLD = float(os.environ.get("MEETING_SCRIBE_CLUSTER_THRESHOLD", "0.8"))
+# 클러스터링 임계값 (작을수록 화자를 더 잘게 나눔).
+# 폰 원거리 실녹음 116분 스윕 결과: 0.8=107클러스터(과분할), 1.0=43, 1.1=18, 1.2=과병합 경향.
+# 화자 수를 알면 num_speakers 지정이 항상 더 정확하다 (임계값 무시됨).
+CLUSTER_THRESHOLD = float(os.environ.get("MEETING_SCRIBE_CLUSTER_THRESHOLD", "1.1"))
 # ASR 부스팅에 넣을 최대 용어 수 (과다 부스팅은 역효과)
 MAX_HOTWORDS = int(os.environ.get("MEETING_SCRIBE_MAX_HOTWORDS", "80"))
 # 이 값보다 낮은 avg_logprob 세그먼트는 [?] 불확실 표시
