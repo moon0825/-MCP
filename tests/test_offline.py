@@ -121,6 +121,7 @@ def _fake_models(monkey_ns: dict) -> None:
         "화자2": emb2 + rng.normal(scale=0.05, size=512).astype(np.float32)}
     pipeline.get_adapter = lambda name=None: FakeAsr()
     monkey_ns["emb1"] = emb1
+    monkey_ns["emb2"] = emb2
 
 
 def test_pipeline_e2e_with_fakes() -> None:
@@ -180,8 +181,58 @@ def test_pipeline_e2e_with_fakes() -> None:
     assert any(g["term"] == "AMR" for g in ctx["glossary"])
     print("✓ 회의록 저장 + 컨텍스트 축적")
 
+    # 참석자 한정 화자분리: 김대리·박과장 보이스프린트 등록 후 participants로 후보 제한
+    # (박과장은 일부러 프로젝트 참석자 테이블에 넣지 않음 — confirm_speaker만 한 화자 시나리오)
+    import json
+    kid = db.upsert_speaker("김대리", "테스트 재등록")
+    db.add_speaker_embedding(kid, ns["emb1"], source="test")
+    pkid = db.upsert_speaker("박과장", "테스트 등록")
+    db.add_speaker_embedding(pkid, ns["emb2"], source="test")
+
+    # 대조군: participants 미지정 → 전체 등록 화자가 후보 (기존 동작 보존).
+    # 박과장은 프로젝트 참석자가 아니어도 제안되어야 함 (프로젝트 명단 fallback 금지).
+    job3 = jobs.enqueue("single", str(wav), pid, {"language": "ko"})
+    run_job(job3)
+    map3 = {m["cluster_label"]: m for m in db.get_job_speaker_map(job3)}
+    assert map3["화자2"]["suggested_name"] == "박과장", map3
+    print("✓ participants 미지정 시 전체 등록 화자 후보 (기존 동작 보존)")
+
+    # participants=["김대리"] → 박과장은 어떤 클러스터에도 제안되지 않아야 함
+    res = server.submit_transcription(str(wav), project="오프라인테스트",
+                                      participants=["김대리 :: PM"])
+    job4 = res["job_id"]
+    run_job(job4)
+    j4 = db.get_job(job4)
+    assert j4["status"] == "done", j4["error"]
+    opts4 = json.loads(j4["options"])
+    assert opts4["participants"] == ["김대리"], opts4  # 역할(:: PM)은 제거
+    assert "num_speakers" not in opts4, opts4  # 참석자 수로 강제하지 않음 (자동 추정 유지)
+    map4 = {m["cluster_label"]: m for m in db.get_job_speaker_map(job4)}
+    assert map4["화자1"]["suggested_name"] == "김대리", map4
+    assert all(m["suggested_name"] != "박과장" for m in map4.values()), map4
+    print("✓ 참석자 한정 화자분리 (명단 밖 화자 미제안 + 화자 수 자동 추정 유지)")
+
+    # participants 파싱: 중복 제거, 괄호 역할 제거, 형식 오류 즉시 에러, 무교집합 경고
+    res5 = server.submit_transcription(str(wav), project="오프라인테스트",
+                                       participants=["김대리 :: PM", "김대리 :: 서기",
+                                                     "박과장(과장)"])
+    opts5 = json.loads(db.get_job(res5["job_id"])["options"])
+    assert opts5["participants"] == ["김대리", "박과장"], opts5  # 중복·괄호 정리
+    assert "num_speakers" not in opts5, opts5
+    for bad in (["김대리, 박과장"], ["김대리 : PM"]):
+        try:
+            server.submit_transcription(str(wav), project="오프라인테스트", participants=bad)
+            raise AssertionError(f"형식 오류 participants가 통과됨: {bad}")
+        except ValueError:
+            pass
+    res6 = server.submit_transcription(str(wav), project="오프라인테스트",
+                                       participants=["미등록인물"])
+    assert "warning" in res6, res6  # 등록 화자·프로젝트 참석자와 무교집합 → 경고
+    print("✓ participants 파싱 검증 (중복 제거 + 형식 오류 에러 + 무교집합 경고)")
+
     # purge (동의 철회)
     assert server.purge_speaker("김대리")["deleted"] is True
+    assert server.purge_speaker("박과장")["deleted"] is True
     assert not db.all_speaker_embeddings()
     print("✓ 보이스프린트 삭제")
 

@@ -26,6 +26,20 @@ def _hotwords_and_hint(project_id: int | None) -> tuple[list[str], str]:
     return hotwords, ctx.get("description", "")
 
 
+def _enrolled_for_matching(options: dict) -> list[tuple]:
+    """등록 화자 임베딩 반환 (참석자 한정 화자분리).
+
+    options["participants"](이번 회의 참석자)가 명시된 경우에만 그 이름으로 후보를
+    제한하고, 없으면 전체 등록 화자를 사용한다 (기존 동작 보존 — 프로젝트 참석자
+    명단으로 임의 제한하지 않음: confirm_speaker로만 등록된 화자도 제안되어야 함).
+    """
+    enrolled = db.all_speaker_embeddings()
+    allowed = {n.strip() for n in options.get("participants") or [] if n.strip()}
+    if not allowed:
+        return enrolled
+    return [(sid, name, emb) for sid, name, emb in enrolled if name in allowed]
+
+
 def name_map_for_job(job_id: str) -> dict[str, str]:
     """클러스터 → 표시 이름 (확정 > 제안(물음표) > 클러스터 라벨)."""
     out: dict[str, str] = {}
@@ -82,7 +96,7 @@ def run_single(job_id: str) -> None:
 
         _stage(job_id, "화자 임베딩 추출·등록 화자 매칭")
         cluster_embs = extract_cluster_embeddings(samples, sr, diar, num_threads=threads)
-        matches = match_speakers(cluster_embs, db.all_speaker_embeddings())
+        matches = match_speakers(cluster_embs, _enrolled_for_matching(options))
         for cluster, emb in cluster_embs.items():
             sid, _name, sim = matches.get(cluster, (None, None, 0.0))
             db.set_job_speaker_map(job_id, cluster, emb, sid, sim)
@@ -130,7 +144,7 @@ def run_zoom_tracks(job_id: str) -> None:
 
     hotwords, hint = _hotwords_and_hint(job["project_id"])
     adapter = get_adapter(options.get("asr"))
-    enrolled = db.all_speaker_embeddings()
+    enrolled = _enrolled_for_matching(options)
 
     all_utts: list[Utterance] = []
     total_dur = 0.0

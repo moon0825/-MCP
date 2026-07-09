@@ -5,6 +5,7 @@
 """
 import json
 import os
+import re
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -41,6 +42,27 @@ def _project_id(project: str | None) -> int | None:
     if row is None:
         raise ValueError(f"프로젝트 '{project}'가 없습니다. create_project로 먼저 등록하세요.")
     return row["id"]
+
+
+def _parse_participant_names(participants: list[str]) -> list[str]:
+    """'이름' 또는 '이름 :: 역할' 항목에서 이름만 추출 (중복 제거, 순서 유지).
+
+    쉼표 결합('김대리, 박과장')이나 단일 콜론('김대리 : PM') 같은 형식 오류는
+    조용히 '후보 0명'으로 증폭되지 않도록 즉시 에러를 낸다.
+    '김대리(PM)' 형태의 꼬리 괄호 역할 표기는 이름만 남기고 제거한다."""
+    names: list[str] = []
+    for t in participants:
+        name = t.partition("::")[0].strip()
+        name = re.sub(r"\s*\([^()]*\)\s*$", "", name).strip()  # '김대리(PM)' → '김대리'
+        if not name:
+            continue
+        if "," in name or ":" in name:
+            raise ValueError(
+                f"participants 항목 형식 오류: '{t}' — 항목 하나에 한 사람만, "
+                "'이름' 또는 '이름 :: 역할' 형식으로 넘기세요.")
+        if name not in names:
+            names.append(name)
+    return names
 
 
 @mcp.tool()
@@ -126,22 +148,42 @@ def get_project_context(project: str) -> dict:
 @mcp.tool()
 def submit_transcription(file_path: str, project: str = "", language: str = "ko",
                          num_speakers: int = 0, asr: str = "",
-                         skip_diarization: bool = False) -> dict:
+                         skip_diarization: bool = False,
+                         participants: list[str] = []) -> dict:
     """녹음 파일 전사 작업 등록 (즉시 job_id 반환, 백그라운드 처리).
     - file_path: 오디오 파일 절대 경로 (m4a/mp3/wav 등)
-    - num_speakers: 화자 수를 알면 지정 (정확도 향상), 0이면 자동
-    - asr: rtzr|groq|gemini|local 강제 지정 (기본: 자동 선택. 민감한 회의는 'local')"""
+    - num_speakers: 실제로 발화한 화자 수를 알 때만 지정 (정확도 향상), 0이면 자동 추정.
+      참석자 수로 추측해 넘기지 말 것 — 발화하지 않은 배석자가 있으면 과분할된다.
+    - asr: rtzr|groq|gemini|local 강제 지정 (기본: 자동 선택. 민감한 회의는 'local')
+    - participants: 이 회의의 실제 참석자 이름 목록. 각 항목은 한 사람, '이름' 또는
+      '이름 :: 역할' 형식 (역할은 무시하고 이름만 사용). 지정하면 등록 화자 이름 제안이
+      이 명단으로 한정된다. 화자 수 추정에는 영향을 주지 않는다."""
     p = Path(file_path)
     if not p.is_file():
         raise ValueError(f"파일 없음: {file_path}")
+    pid = _project_id(project)
     options = {"language": language, "skip_diarization": skip_diarization}
+    names = _parse_participant_names(participants)
+    warning = None
+    if names:
+        options["participants"] = names
+        known = {s["name"] for s in db.list_speakers()}
+        if pid:
+            known |= {q["name"] for q in db.get_context(pid, recent_meetings=0)["participants"]}
+        if known and not (set(names) & known):
+            warning = ("participants가 등록 화자·프로젝트 참석자 어느 이름과도 일치하지 "
+                       "않습니다. 이름 표기를 확인하세요 — 이대로면 등록 화자 제안이 "
+                       "전혀 나오지 않습니다.")
     if num_speakers > 0:
         options["num_speakers"] = num_speakers
     if asr:
         options["asr"] = asr
-    job_id = enqueue("single", file_path, _project_id(project), options)
-    return {"job_id": job_id, "status": "queued",
-            "hint": "get_job_status로 진행 확인. 하이브리드 기본 설정 기준 수 분 소요."}
+    job_id = enqueue("single", file_path, pid, options)
+    out = {"job_id": job_id, "status": "queued",
+           "hint": "get_job_status로 진행 확인. 하이브리드 기본 설정 기준 수 분 소요."}
+    if warning:
+        out["warning"] = warning
+    return out
 
 
 @mcp.tool()
