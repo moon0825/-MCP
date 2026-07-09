@@ -183,12 +183,17 @@ def run_job(job_id: str) -> None:
     job = db.get_job(job_id)
     if job is None:
         return
+    if job["status"] == "done":  # 다른 프로세스가 이미 완료 — 이중 실행 방지
+        return
     try:
         if job["kind"] == "zoom_tracks":
             run_zoom_tracks(job_id)
         else:
             run_single(job_id)
     except Exception as e:  # 실패를 DB에 남겨 get_job_status로 확인 가능하게
+        current = db.get_job(job_id)
+        if current is not None and current["status"] == "done":
+            return  # 이중 실행 중 다른 프로세스가 완료한 결과를 error로 덮어쓰지 않음
         db.update_job(job_id, status="error", error=f"{type(e).__name__}: {e}")
 
 

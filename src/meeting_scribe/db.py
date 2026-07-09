@@ -1,7 +1,7 @@
 """SQLite 저장소: 프로젝트/용어집/참석자, 화자 보이스프린트, 작업 큐, 회의 기록."""
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
@@ -303,11 +303,24 @@ def get_job(job_id: str) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
 
-def pending_jobs() -> list[str]:
+def pending_jobs(stale_running_seconds: int | None = None) -> list[str]:
+    """미완료 작업 id. 'queued'는 항상 포함. 'running'은 stale_running_seconds가 주어지면
+    updated_at이 그보다 오래된 것만 포함 — 살아있는 다른 프로세스가 실행 중인 작업을
+    뺏어 이중 실행하지 않기 위한 스테일 판정 (updated_at·now()는 동일 포맷 UTC ISO-8601이라
+    문자열 비교 가능)."""
     with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT id FROM jobs WHERE status IN ('queued','running') ORDER BY created_at"
-        ).fetchall()
+        if stale_running_seconds is None:
+            rows = conn.execute(
+                "SELECT id FROM jobs WHERE status IN ('queued','running') ORDER BY created_at"
+            ).fetchall()
+        else:
+            cutoff = (datetime.now(timezone.utc)
+                      - timedelta(seconds=stale_running_seconds)).isoformat(timespec="seconds")
+            rows = conn.execute(
+                "SELECT id FROM jobs WHERE status='queued' "
+                "OR (status='running' AND updated_at < ?) ORDER BY created_at",
+                (cutoff,),
+            ).fetchall()
         return [r["id"] for r in rows]
 
 

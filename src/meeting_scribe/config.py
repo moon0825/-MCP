@@ -17,6 +17,9 @@ CLUSTER_THRESHOLD = float(os.environ.get("MEETING_SCRIBE_CLUSTER_THRESHOLD", "1.
 MAX_HOTWORDS = int(os.environ.get("MEETING_SCRIBE_MAX_HOTWORDS", "80"))
 # 이 값보다 낮은 avg_logprob 세그먼트는 [?] 불확실 표시
 LOW_CONFIDENCE_LOGPROB = float(os.environ.get("MEETING_SCRIBE_LOW_CONF", "-0.8"))
+# 재시작 복구 시 'running' 작업을 재큐잉하는 기준: updated_at이 이 시간 이상 오래되면
+# 소유 프로세스가 죽었다고 판정. 살아있는 다른 프로세스의 작업을 뺏어 이중 실행하는 것 방지.
+STALE_RUNNING_SECONDS = int(os.environ.get("MEETING_SCRIBE_STALE_RUNNING_SEC", "600"))
 
 DEFAULT_LANGUAGE = os.environ.get("MEETING_SCRIBE_LANGUAGE", "ko")
 

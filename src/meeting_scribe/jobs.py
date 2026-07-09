@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 
 from . import db
-from .config import JOBS_DIR
+from .config import JOBS_DIR, STALE_RUNNING_SECONDS
 from .pipeline import run_job
 
 _queue: "queue.Queue[str]" = queue.Queue()
@@ -27,7 +27,9 @@ def start_worker() -> None:
     if _worker is None or not _worker.is_alive():
         _worker = threading.Thread(target=_loop, daemon=True, name="scribe-worker")
         _worker.start()
-    for job_id in db.pending_jobs():  # 재시작 복구
+    # 재시작 복구: queued는 전부, running은 스테일한 것만 — 살아있는 다른 프로세스
+    # (별도 스크립트, 이전 서버 인스턴스)가 실행 중인 작업을 뺏어 이중 실행하지 않는다.
+    for job_id in db.pending_jobs(stale_running_seconds=STALE_RUNNING_SECONDS):
         _queue.put(job_id)
 
 
