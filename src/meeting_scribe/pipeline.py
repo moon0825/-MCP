@@ -76,10 +76,12 @@ def run_single(job_id: str) -> None:
     diar: list[DiarSegment] = []
     if not options.get("skip_diarization"):
         _stage(job_id, f"화자분리 (로컬 CPU, 오디오 {dur/60:.0f}분)")
-        diar = diarize(samples, sr, num_speakers=options.get("num_speakers"))
+        threads = detect_num_threads()
+        diar = diarize(samples, sr, num_speakers=options.get("num_speakers"),
+                       num_threads=threads)
 
         _stage(job_id, "화자 임베딩 추출·등록 화자 매칭")
-        cluster_embs = extract_cluster_embeddings(samples, sr, diar)
+        cluster_embs = extract_cluster_embeddings(samples, sr, diar, num_threads=threads)
         matches = match_speakers(cluster_embs, db.all_speaker_embeddings())
         for cluster, emb in cluster_embs.items():
             sid, _name, sim = matches.get(cluster, (None, None, 0.0))
@@ -141,7 +143,8 @@ def run_zoom_tracks(job_id: str) -> None:
 
         # 근접 마이크 단일 화자 트랙 → 전체를 한 화자 구간으로 보고 임베딩 추출
         segs = [DiarSegment(0.0, duration_seconds(wav), label)]
-        embs = extract_cluster_embeddings(samples, sr, segs)
+        embs = extract_cluster_embeddings(samples, sr, segs,
+                                          num_threads=detect_num_threads())
         if label in embs:
             matches = match_speakers({label: embs[label]}, enrolled)
             sid, _n, sim = matches[label]
@@ -176,4 +179,5 @@ def run_job(job_id: str) -> None:
 
 
 def detect_num_threads() -> int:
-    return max(1, min(4, (os.cpu_count() or 2) - 1))
+    """ONNX 추론 스레드 수: 코어를 다 쓰지 않고 상한 8 (그 이상은 수확 체감 + 시스템 점유)."""
+    return max(1, min(8, (os.cpu_count() or 2) - 1))

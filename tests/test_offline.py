@@ -114,7 +114,7 @@ def _fake_models(monkey_ns: dict) -> None:
     emb1 = rng.normal(size=512).astype(np.float32)
     emb2 = rng.normal(size=512).astype(np.float32)
 
-    pipeline.diarize = lambda samples, sr, num_speakers=None: [
+    pipeline.diarize = lambda samples, sr, num_speakers=None, **kw: [
         DiarSegment(0.0, 1.5, "화자1"), DiarSegment(1.7, 3.0, "화자2")]
     pipeline.extract_cluster_embeddings = lambda samples, sr, segs, **kw: {
         "화자1": emb1 + rng.normal(scale=0.05, size=512).astype(np.float32),
