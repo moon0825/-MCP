@@ -1,18 +1,33 @@
 """하드웨어 감지: NVIDIA GPU(VRAM), CUDA 런타임, RAM."""
+import ctypes
 import shutil
 import subprocess
+import sys
 
 
 def ram_gb() -> float | None:
     try:
         with open("/proc/meminfo") as f:
             return round(int(f.readline().split()[1]) / (1024 ** 2), 1)
-    except OSError:  # Windows/macOS
-        try:
-            import psutil
-            return round(psutil.virtual_memory().total / (1024 ** 3), 1)
-        except ImportError:
-            return None
+    except OSError:
+        pass
+    if sys.platform == "win32":
+        class _MemStatus(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong)] + [
+                (f, ctypes.c_ulonglong) for f in (
+                    "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile", "ullAvailPageFile",
+                    "ullTotalVirtual", "ullAvailVirtual", "ullAvailExtendedVirtual")]
+
+        stat = _MemStatus(dwLength=ctypes.sizeof(_MemStatus))
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return round(stat.ullTotalPhys / (1024 ** 3), 1)
+        return None
+    try:  # macOS
+        out = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                             capture_output=True, text=True, timeout=5)
+        return round(int(out.stdout.strip()) / (1024 ** 3), 1)
+    except Exception:
+        return None
 
 
 def nvidia_gpu() -> dict | None:
