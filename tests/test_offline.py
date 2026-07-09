@@ -5,6 +5,8 @@
 - audio: ffmpeg 정규화 → 16kHz mono, wav 읽기, 분할
 - 파이프라인 E2E (화자분리·임베딩·ASR을 가짜로 대체): 1차 전사 → 화자 학습 → 2차 전사에서
   재인식 제안 → confirm_speaker 동의 게이트 → 전사본 재생성 → save_minutes 컨텍스트 축적
+- job 소유권 가드: done 작업 스킵, done을 error로 덮어쓰기 방지, 스테일 running만 재큐잉
+- asr/groq: 429/5xx 재시도 (Retry-After 존중 + 지수 백오프, 가짜 클라이언트로 네트워크 없이)
 - server: FastMCP 툴 등록·직접 호출
 
 실행: .venv/bin/python tests/test_offline.py
@@ -237,6 +239,107 @@ def test_pipeline_e2e_with_fakes() -> None:
     print("✓ 보이스프린트 삭제")
 
 
+def test_job_ownership_guards() -> None:
+    from datetime import datetime, timedelta, timezone
+    from meeting_scribe import pipeline
+
+    # 1) run_job은 이미 done인 작업을 건드리지 않음 (이중 실행 방지)
+    done_job = jobs.enqueue("single", str(TEST_DATA / "없는파일.wav"), None, {})
+    db.update_job(done_job, status="done", stage="완료")
+    pipeline.run_job(done_job)  # 가드 없으면 입력 파일이 없어 error로 덮어씀
+    j = db.get_job(done_job)
+    assert j["status"] == "done" and j["error"] == "", dict(j)
+
+    # 2) 실행 중 예외가 나도, 그 사이 다른 프로세스가 done으로 끝냈으면 error로 덮어쓰지 않음
+    #    (실사례: job f3fed1198f20 — 이전 인스턴스가 완료한 작업을 error로 덮어씀)
+    race_job = jobs.enqueue("single", str(TEST_DATA / "없는파일.wav"), None, {})
+    orig_run_single = pipeline.run_single
+
+    def _other_process_finishes_then_we_fail(job_id):
+        db.update_job(job_id, status="done", stage="완료")  # 다른 프로세스가 먼저 완료
+        raise RuntimeError("이중 실행된 쪽의 실패")
+
+    pipeline.run_single = _other_process_finishes_then_we_fail
+    try:
+        pipeline.run_job(race_job)
+    finally:
+        pipeline.run_single = orig_run_single
+    j2 = db.get_job(race_job)
+    assert j2["status"] == "done" and j2["error"] == "", dict(j2)
+
+    # 3) 재시작 복구: queued는 항상, running은 updated_at이 스테일한 것만 재큐잉
+    q_job = jobs.enqueue("single", str(TEST_DATA / "없는파일.wav"), None, {})
+    fresh_run = jobs.enqueue("single", str(TEST_DATA / "없는파일.wav"), None, {})
+    db.update_job(fresh_run, status="running", stage="ASR")  # 방금 갱신 → 살아있는 프로세스 소유
+    stale_run = jobs.enqueue("single", str(TEST_DATA / "없는파일.wav"), None, {})
+    db.update_job(stale_run, status="running", stage="ASR")
+    old = (datetime.now(timezone.utc) - timedelta(seconds=1200)).isoformat(timespec="seconds")
+    with db.get_conn() as conn:
+        conn.execute("UPDATE jobs SET updated_at=? WHERE id=?", (old, stale_run))
+    resumable = db.pending_jobs(stale_running_seconds=600)
+    assert q_job in resumable, resumable
+    assert stale_run in resumable, resumable  # 죽은 프로세스의 작업은 재개 (기존 기능 유지)
+    assert fresh_run not in resumable, resumable
+    assert done_job not in resumable
+    assert fresh_run in db.pending_jobs()  # 스테일 판정 없는 기본 동작은 그대로
+    print("✓ job 소유권 가드 (done 스킵 + error 덮어쓰기 방지 + 스테일 재큐잉)")
+
+
+def test_groq_retry() -> None:
+    import types
+
+    import httpx
+    from meeting_scribe.asr import groq
+
+    fake_chunk = TEST_DATA / "retry_chunk.wav"
+    fake_chunk.write_bytes(b"RIFF")  # 내용 무관 — 시도마다 다시 열 수 있으면 됨
+
+    class FakeClient:
+        def __init__(self, statuses):
+            self.statuses = list(statuses)
+            self.calls = 0
+
+        def post(self, url, **kw):
+            self.calls += 1
+            status = self.statuses.pop(0)
+            headers = {"retry-after": "7"} if status == 429 else {}
+            return httpx.Response(status, headers=headers, json={"text": "ok"},
+                                  request=httpx.Request("POST", url))
+
+    sleeps: list[float] = []
+    orig_time = groq.time
+    groq.time = types.SimpleNamespace(sleep=sleeps.append)
+    try:
+        # 429 → 500 → 성공: Retry-After 존중, 헤더 없으면 지수 백오프
+        c = FakeClient([429, 500, 200])
+        resp = groq._post_with_retry(c, fake_chunk, "fake-key", {})
+        assert resp.status_code == 200 and c.calls == 3
+        assert sleeps == [7.0, 4.0], sleeps  # 7=Retry-After, 4=2*2^1 백오프
+
+        # 재시도 불가 4xx는 즉시 실패
+        sleeps.clear()
+        c2 = FakeClient([400])
+        try:
+            groq._post_with_retry(c2, fake_chunk, "fake-key", {})
+            raise AssertionError("400이 통과됨")
+        except httpx.HTTPStatusError:
+            pass
+        assert c2.calls == 1 and not sleeps
+
+        # 재시도 소진 (초기 1회 + 재시도 3회) 후 429 그대로 실패
+        sleeps.clear()
+        c3 = FakeClient([429, 429, 429, 429])
+        try:
+            groq._post_with_retry(c3, fake_chunk, "fake-key", {})
+            raise AssertionError("429 소진이 통과됨")
+        except httpx.HTTPStatusError:
+            pass
+        assert c3.calls == 4 and len(sleeps) == 3
+    finally:
+        groq.time = orig_time
+    print("✓ Groq 429/5xx 재시도 (Retry-After 존중 + 백오프 + 소진 시 실패)")
+
+
 def test_server_tools_registered() -> None:
     from meeting_scribe import server
     import anyio
@@ -259,5 +362,7 @@ if __name__ == "__main__":
     test_audio()
     test_speaker_matching_math()
     test_pipeline_e2e_with_fakes()
+    test_job_ownership_guards()
+    test_groq_retry()
     test_server_tools_registered()
     print("\n오프라인 테스트 전부 통과 ✅")
